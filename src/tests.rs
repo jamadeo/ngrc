@@ -42,6 +42,18 @@ impl Provider for ScriptedProvider {
                 assert!(format!("{response:?}").contains("gdk-shell-ok"));
                 Message::assistant().with_text("done")
             }
+            2 => {
+                let text: Vec<_> = messages.iter().map(Message::as_concat_text).collect();
+                assert!(text.iter().any(|text| text == "test"));
+                assert!(text.iter().any(|text| text == "done"));
+                assert_eq!(text.last().unwrap(), "follow up");
+                let response = messages
+                    .iter()
+                    .find(|message| message.get_tool_response_ids().contains(&"shell-1"))
+                    .expect("previous shell result must remain in context");
+                assert!(format!("{response:?}").contains("gdk-shell-ok"));
+                Message::assistant().with_text("follow-up done")
+            }
             n => panic!("unexpected provider call {n}"),
         };
         Ok(stream_from_single_message(
@@ -142,5 +154,156 @@ async fn provider_errors_are_detectable_in_the_final_session() -> Result<()> {
         .run(&runtime(), "main", &emitter)
         .await?;
     assert!(session.conversation.last().unwrap().error_kind().is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_uses_bash() -> Result<()> {
+    let output = Shell::invoke(
+        &runtime().load("main").await?,
+        ShellInput {
+            command:
+                "[[ -n $BASH_VERSION ]] && values=(hello bash) && printf '%s' \"${values[1]}\""
+                    .into(),
+        },
+    )
+    .await?;
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(output.stdout, "bash");
+    Ok(())
+}
+
+fn empty_runtime() -> Runtime {
+    Runtime(Mutex::new(Session {
+        conversation: Conversation::empty(),
+        cwd: std::env::temp_dir(),
+    }))
+}
+
+#[tokio::test]
+async fn chat_keeps_context_with_or_without_initial_arguments() -> Result<()> {
+    for initial in [None, Some("test".to_owned())] {
+        let runtime = empty_runtime();
+        let provider = Arc::new(ScriptedProvider(AtomicUsize::new(0)));
+        let (tx, rx) = tokio::sync::mpsc::channel(5);
+        tx.send(Ok("   ".into())).await?;
+        if initial.is_none() {
+            tx.send(Ok("test".into())).await?;
+        }
+        tx.send(Ok("follow up".into())).await?;
+        drop(tx); // EOF after the queued lines.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            chat(
+                &runtime,
+                provider.clone(),
+                ModelConfig::new("test"),
+                initial,
+                rx,
+                CancellationToken::new(),
+            ),
+        )
+        .await??;
+        let session = runtime.load("main").await?;
+        assert_eq!(
+            session.conversation.last().unwrap().as_concat_text(),
+            "follow-up done"
+        );
+        assert_eq!(provider.0.load(Ordering::SeqCst), 3);
+        let user_prompts: Vec<_> = session
+            .conversation
+            .iter()
+            .filter(|message| {
+                message.role == rmcp::model::Role::User && !message.is_tool_response()
+            })
+            .map(Message::as_concat_text)
+            .collect();
+        assert_eq!(user_prompts, ["test", "follow up"]);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_waits_without_an_initial_message_and_exits_on_eof() -> Result<()> {
+    let runtime = empty_runtime();
+    let provider = Arc::new(ScriptedProvider(AtomicUsize::new(0)));
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let task_runtime = &runtime;
+    let task_provider = provider.clone();
+    let chat = chat(
+        task_runtime,
+        task_provider,
+        ModelConfig::new("test"),
+        None,
+        rx,
+        CancellationToken::new(),
+    );
+    tokio::pin!(chat);
+    tokio::select! {
+        result = &mut chat => panic!("chat exited before EOF: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+    }
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+    tx.send(Ok(" \t".into())).await?;
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), chat).await??;
+    assert!(runtime.load("main").await?.conversation.is_empty());
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_chat_can_be_cancelled() -> Result<()> {
+    let runtime = empty_runtime();
+    let provider = Arc::new(ScriptedProvider(AtomicUsize::new(0)));
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let chat = chat(
+        &runtime,
+        provider.clone(),
+        ModelConfig::new("test"),
+        None,
+        rx,
+        cancel,
+    );
+    let cancel_later = async {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        stop.cancel();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(chat, cancel_later)
+    })
+    .await?;
+    result?;
+    assert_eq!(provider.0.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_failure_does_not_close_chat() -> Result<()> {
+    let runtime = empty_runtime();
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(Ok("retry".into())).await?;
+    drop(tx);
+    chat(
+        &runtime,
+        Arc::new(FailingProvider),
+        ModelConfig::new("test"),
+        Some("first".into()),
+        rx,
+        CancellationToken::new(),
+    )
+    .await?;
+    let session = runtime.load("main").await?;
+    assert_eq!(
+        session
+            .conversation
+            .iter()
+            .filter(|message| message.error_kind().is_some())
+            .count(),
+        2
+    );
+    assert_eq!(session.conversation.len(), 4);
     Ok(())
 }

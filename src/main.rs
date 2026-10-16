@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    io::{self, Write},
+    io::{self, BufRead, Write},
     path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
@@ -191,34 +191,27 @@ fn agent(
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
-        println!("Usage: ngrc <prompt>\n\nRequires OPENAI_API_KEY and NGRC_MODEL.\nRuns shell commands without approval in the current directory. Not sandboxed.");
-        return Ok(());
-    }
-    let prompt = args.join(" ");
-    if prompt.trim().is_empty() {
-        bail!("usage: ngrc <prompt> (see --help)");
-    }
-    let key = std::env::var("OPENAI_API_KEY").context("set OPENAI_API_KEY")?;
-    let model =
-        std::env::var("NGRC_MODEL").context("set NGRC_MODEL to a tool-capable OpenAI model")?;
-    if key.trim().is_empty() || model.trim().is_empty() {
-        bail!("OPENAI_API_KEY and NGRC_MODEL must not be empty");
-    }
-    let client = ApiClient::new_with_tls(
-        "https://api.openai.com".into(),
-        AuthMethod::BearerToken(key),
-        Some(Default::default()),
-    )?;
-    let runtime = Runtime(Mutex::new(Session {
-        conversation: Conversation::new_unvalidated([Message::user().with_text(prompt)]),
-        cwd: std::env::current_dir()?,
-    }));
-    eprintln!("Warning: shell commands run without approval or sandboxing. Ctrl-C to stop.");
-    let cancel = CancellationToken::new();
+// A dedicated reader lets idle Ctrl-C exit without leaving Tokio waiting on a
+// blocking stdin task. Only one line is queued ahead of the current turn.
+fn stdin_lines() -> tokio::sync::mpsc::Receiver<io::Result<String>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    std::thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            let failed = line.is_err();
+            if tx.blocking_send(line).is_err() || failed {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+async fn run_turn(
+    runtime: &Runtime,
+    provider: Arc<dyn Provider>,
+    model: ModelConfig,
+    cancel: CancellationToken,
+) -> Result<Session> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
     let display = tokio::spawn(async move {
@@ -240,32 +233,109 @@ async fn main() -> Result<()> {
         println!();
         Ok::<_, io::Error>(())
     });
+    let machine = agent(provider, model, cancel);
+    // Await the run even on cancellation so the GDK can finalize tool responses.
+    let result = machine.run(runtime, "main", &emitter).await;
+    drop(emitter);
+    display.await??;
+    result
+}
+
+async fn chat(
+    runtime: &Runtime,
+    provider: Arc<dyn Provider>,
+    model: ModelConfig,
+    initial: Option<String>,
+    mut lines: tokio::sync::mpsc::Receiver<io::Result<String>>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let mut pending = initial;
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let prompt = if let Some(prompt) = pending.take() {
+            prompt
+        } else {
+            eprint!("\n> ");
+            io::stderr().flush()?;
+            let line = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                line = lines.recv() => line,
+            };
+            let Some(line) = line else { break };
+            line?
+        };
+        if prompt.trim().is_empty() {
+            continue;
+        }
+        runtime.0.lock().unwrap().conversation.push(
+            Message::user()
+                .with_text(prompt)
+                .with_generated_id_if_missing(),
+        );
+        let session = run_turn(runtime, provider.clone(), model.clone(), cancel.clone()).await?;
+        if cancel.is_cancelled() {
+            break;
+        }
+        // Provider failures are messages, not Err returns. Keep the chat open so
+        // a follow-up can retry; unexpected runtime errors still propagate.
+        if session
+            .conversation
+            .last()
+            .is_some_and(|message| message.error_kind().is_some())
+        {
+            eprintln!("Request failed. Send another message to retry.");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        println!("Usage: ngrc [prompt]\n\nStart a chat, optionally sending the first message from arguments.\nRequires OPENAI_API_KEY and NGRC_MODEL.\nEOF (Ctrl-D) or Ctrl-C exits. History is kept only in memory.\nRuns Bash commands without approval in the current directory. Not sandboxed.");
+        return Ok(());
+    }
+    let key = std::env::var("OPENAI_API_KEY").context("set OPENAI_API_KEY")?;
+    let model =
+        std::env::var("NGRC_MODEL").context("set NGRC_MODEL to a tool-capable OpenAI model")?;
+    if key.trim().is_empty() || model.trim().is_empty() {
+        bail!("OPENAI_API_KEY and NGRC_MODEL must not be empty");
+    }
+    let client = ApiClient::new_with_tls(
+        "https://api.openai.com".into(),
+        AuthMethod::BearerToken(key),
+        Some(Default::default()),
+    )?;
+    let runtime = Runtime(Mutex::new(Session {
+        conversation: Conversation::empty(),
+        cwd: std::env::current_dir()?,
+    }));
+    eprintln!("Warning: shell commands run without approval or sandboxing. EOF or Ctrl-C to exit.");
+    let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let ctrl_c = tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             stop.cancel();
         }
     });
-    let machine = agent(
+    let initial = (!args.is_empty()).then(|| args.join(" "));
+    let result = chat(
+        &runtime,
         Arc::new(OpenAiProvider::new(client)),
         ModelConfig::new(model),
+        initial,
+        stdin_lines(),
         cancel.clone(),
-    );
-    let result = machine.run(&runtime, "main", &emitter).await;
+    )
+    .await;
     ctrl_c.abort();
-    drop(emitter);
-    display.await??;
-    let session = result?;
+    result?;
     if cancel.is_cancelled() {
         bail!("cancelled");
-    }
-    // InferenceRunner represents provider failures as messages, not Err returns.
-    if session
-        .conversation
-        .last()
-        .is_some_and(|message| message.error_kind().is_some())
-    {
-        bail!("provider request failed (see above)");
     }
     Ok(())
 }

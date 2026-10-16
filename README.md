@@ -1,7 +1,8 @@
 # ngrc
 
-A minimal Rust coding agent built with the Goose GDK. One prompt per invocation,
-one in-memory conversation, and exactly one tool: `shell`.
+A minimal Rust coding agent built with the Goose GDK. An interactive chat with
+one in-memory conversation and exactly one tool: `shell`. Nothing saves the
+conversation to disk; it is discarded when the process exits.
 
 The GDK handles inference, tool dispatch, and the model/tool loop. This application
 supplies an in-memory session, system prompt, and a `/bin/bash -c` tool. The initial
@@ -14,13 +15,23 @@ Set `OPENAI_API_KEY` and `NGRC_MODEL` in your environment. The model must suppor
 tool calling; there is deliberately no hardcoded model default. From this directory:
 
 ```sh
+cargo run --locked
+# Or send an initial message before entering the same chat:
 cargo run --locked -- "Inspect this project and summarize it without changing files"
 ```
+
+With no arguments, the app starts at a `>` prompt without making a model request.
+Type a message and press Enter; after the reply, send follow-up messages at the
+next prompt. Earlier messages, replies, and shell results remain in context.
+Blank lines are ignored. EOF (Ctrl-D on an empty line) exits cleanly; Ctrl-C exits
+whether waiting for input or running a turn. Each input line is a single message.
+Provider errors are displayed and return to the prompt so you can retry.
 
 Commands start in the process's current directory. Each shell call is independent:
 `cd` and shell variables do not persist. stdout, stderr, and exit status are returned
 to the model; commands are logged to stderr and assistant text streams to stdout.
-No interactive terminal, REPL, saved sessions, or other tools are included.
+The chat has a simple line prompt, but shell commands have no interactive terminal.
+No saved sessions or other tools are included.
 
 **Warning:** commands execute immediately, with your user permissions and inherited
 environment (including credentials). There is no approval prompt, filesystem/network
@@ -42,9 +53,11 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 Tests use fake providers and a real local shell: only the shell schema is exposed,
-stdout/stderr/exit status and cwd are preserved, a model → shell → model turn
-finishes, and provider failures remain detectable. No paid/live model call is
-required for tests. Authenticated live inference has not been tested.
+stdout/stderr/exit status and cwd are preserved, Bash-specific syntax works, and a
+model → shell → model turn finishes. Chat tests cover follow-up context including
+prior shell results, optional initial input, blank lines, EOF, idle cancellation,
+and retrying after provider errors. No paid/live model call is required for tests.
+Authenticated live inference has not been tested.
 
 ## GDK notes / gaps
 
@@ -61,7 +74,9 @@ are worth recording rather than building a framework around them:
   `ConversationEffect` does not implement it. This app uses a small custom effect
   enum and intentionally discards usage accounting.
 - Provider failures can be represented as error messages in a successful machine
-  result. The CLI renders these and checks the final message to exit unsuccessfully.
+  result. The CLI renders these and returns to the prompt for a follow-up/retry.
+- Each turn builds a fresh machine around the same in-memory session. The complete
+  conversation stays available to inference without disk persistence.
 - Tool approval, shell isolation, bounded output, process-tree cleanup, and a run
   budget are not supplied by this minimal assembly. They remain unimplemented here;
   this is not a claim that no other GDK component can help with them.
