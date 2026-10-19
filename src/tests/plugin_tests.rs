@@ -14,11 +14,11 @@ fn tool_source(name: &str, body: &str) -> PluginSource {
         &format!(
             r#"
         let count = 0;
-        ({{ apiVersion: 1, tools: [{{
+        ({{ apiVersion: 1, tools() {{ return [{{
             name: {name:?}, description: "Test plugin",
             inputSchema: {{type: "object"}},
             execute(input, context) {{ {body} }}
-        }}] }})
+        }}]; }} }})
     "#
         ),
     )
@@ -68,10 +68,10 @@ async fn multiple_tools_can_share_one_plugin_context() -> Result<()> {
         "shared.js",
         r#"
         let count = 0;
-        ({ apiVersion: 1, tools: ["one", "two"].map(name => ({
+        ({ apiVersion: 1, tools() { return ["one", "two"].map(name => ({
             name, description: "Increment", inputSchema: {type: "object"},
             execute() { return ++count; }
-        })) })
+        })); } })
     "#,
     )])
     .await?;
@@ -93,10 +93,16 @@ async fn invalid_plugins_fail_at_startup_with_filename() {
         "42",
         "({apiVersion: 2, tools: []})",
         "({apiVersion: 1, tools: {}})",
-        r#"({apiVersion: 1, tools: [{name: "no-handler", description: "x", inputSchema: {type: "object"}}]})"#,
-        r#"({apiVersion: 1, tools: [{name: "bad name", description: "x", inputSchema: {type: "object"}, execute() {}}]})"#,
-        r#"({apiVersion: 1, tools: [{name: "x", description: "x", inputSchema: {type: "array"}, execute() {}}]})"#,
-        r#"({apiVersion: 1, tools: [{name: "x", description: "x", inputSchema: {type: "object", properties: {x: {type: "nonsense"}}}, execute() {}}]})"#,
+        "({apiVersion: 1, tools: []})",
+        "({apiVersion: 1, context: []})",
+        "({apiVersion: 1, tools() { return {}; }})",
+        "({apiVersion: 1, tools() { throw new Error('tools exploded'); }})",
+        "({apiVersion: 1, async tools() { return []; }})",
+        "({apiVersion: 1, tools() { host.readFile({path: 'AGENTS.md'}); return []; }})",
+        r#"({apiVersion: 1, tools() { return [{name: "no-handler", description: "x", inputSchema: {type: "object"}}]; }})"#,
+        r#"({apiVersion: 1, tools() { return [{name: "bad name", description: "x", inputSchema: {type: "object"}, execute() {}}]; }})"#,
+        r#"({apiVersion: 1, tools() { return [{name: "x", description: "x", inputSchema: {type: "array"}, execute() {}}]; }})"#,
+        r#"({apiVersion: 1, tools() { return [{name: "x", description: "x", inputSchema: {type: "object", properties: {x: {type: "nonsense"}}}, execute() {}}]; }})"#,
         "host.exec({program: '/bin/echo'}); ({apiVersion: 1, tools: []})",
     ] {
         let error = Plugins::from_sources(vec![source("broken.js", body)])
@@ -119,7 +125,7 @@ async fn duplicate_tool_names_are_rejected_within_and_across_files() {
         "duplicate.js",
         r#"
         const tool = {name: "same", description: "x", inputSchema: {type: "object"}, execute() {}};
-        ({apiVersion: 1, tools: [tool, tool]})
+        ({apiVersion: 1, tools() { return [tool, tool]; }})
     "#,
     )])
     .await

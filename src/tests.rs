@@ -353,4 +353,5 @@ async fn provider_failure_does_not_close_chat() -> Result<()> {
     Ok(())
 }
 
+mod context_tests;
 mod plugin_tests;
