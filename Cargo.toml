@@ -3,17 +3,19 @@ name = "ngrc"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.94.1"
-description = "A minimal shell-only coding agent built with the Goose GDK"
+description = "A plugin-based coding agent built with the Goose GDK and Boa"
 publish = false
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+boa_engine = { version = "=0.22.0", default-features = false }
+jsonschema = { version = "0.59", default-features = false }
 goose-agent = "=0.1.0-alpha.12"
 goose-provider-types = "=0.1.0-alpha.12"
 goose-providers = { version = "=0.1.0-alpha.12", features = ["rustls-tls"] }
 rmcp = { version = "=3.4.1", default-features = false, features = ["schemars", "server"] }
-schemars = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "time"] }
 tokio-util = "0.7"

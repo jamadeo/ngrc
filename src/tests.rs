@@ -1,11 +1,13 @@
 use super::*;
-use goose_agent::operation::Operation;
+use goose_agent::{operation::Operation, tool::ToolProvider};
 use goose_provider_types::{
     base::{stream_from_single_message, MessageStream},
     errors::ProviderError,
 };
 use rmcp::model::{CallToolRequestParams, Tool};
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 struct ScriptedProvider(AtomicUsize);
 
@@ -70,10 +72,42 @@ fn runtime() -> Runtime {
     }))
 }
 
+async fn shell_plugins() -> Result<Arc<Plugins>> {
+    Plugins::from_sources(vec![plugins::PluginSource {
+        name: "shell.js".into(),
+        source: include_str!("../plugins/shell.js").into(),
+    }])
+    .await
+}
+
+fn emitter(cancel: CancellationToken) -> Emitter {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    Emitter::new(tx, cancel)
+}
+
+async fn call_plugin(
+    plugins: &Plugins,
+    name: &str,
+    arguments: Value,
+    cancel: CancellationToken,
+) -> Result<Value> {
+    let result = plugins
+        .call(
+            &runtime().load("main").await?,
+            "test-call",
+            CallToolRequestParams::new(name.to_owned())
+                .with_arguments(arguments.as_object().unwrap().clone()),
+            &emitter(cancel),
+        )
+        .await?;
+    Ok(result.structured_content.expect("JSON result"))
+}
+
 #[tokio::test]
-async fn only_shell_is_registered_and_captures_output() -> Result<()> {
+async fn only_plugin_shell_is_registered_and_captures_output() -> Result<()> {
     let session = runtime().load("main").await?;
-    let operation = ToolOperation::<Session>::new().with_async_tool::<Shell>();
+    let plugins = shell_plugins().await?;
+    let operation = ToolOperation::<Session>::new().with_provider(plugins.clone());
     let tools = <ToolOperation<Session> as Operation<Session, Effect>>::inference_tools(
         &operation, &session,
     )
@@ -81,26 +115,28 @@ async fn only_shell_is_registered_and_captures_output() -> Result<()> {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name.as_ref(), "shell");
     assert!(tools[0].input_schema["properties"]["command"].is_object());
-    let output = Shell::invoke(
-        &session,
-        ShellInput {
-            // Reading stdin must immediately reach EOF, not wait for user input.
-            command: "cat; printf hello; printf err >&2; exit 7".into(),
-        },
+    // stdin must immediately reach EOF, not wait for user input.
+    let output = call_plugin(
+        &plugins,
+        "shell",
+        json!({
+            "command": "cat; printf hello; printf err >&2; exit 7"
+        }),
+        CancellationToken::new(),
     )
     .await?;
-    assert_eq!(output.stdout, "hello");
-    assert_eq!(output.stderr, "err");
-    assert_eq!(output.exit_code, Some(7));
-    let output = Shell::invoke(
-        &session,
-        ShellInput {
-            command: "pwd -P".into(),
-        },
+    assert_eq!(output["stdout"], "hello");
+    assert_eq!(output["stderr"], "err");
+    assert_eq!(output["exit_code"], 7);
+    let output = call_plugin(
+        &plugins,
+        "shell",
+        json!({"command": "pwd -P"}),
+        CancellationToken::new(),
     )
     .await?;
     assert_eq!(
-        PathBuf::from(output.stdout.trim()),
+        PathBuf::from(output["stdout"].as_str().unwrap().trim()),
         session.cwd.canonicalize()?
     );
     Ok(())
@@ -112,7 +148,12 @@ async fn model_shell_model_loop_completes() -> Result<()> {
     let cancel = CancellationToken::new();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
-    let machine = agent(provider.clone(), ModelConfig::new("test"), cancel);
+    let machine = agent(
+        provider.clone(),
+        ModelConfig::new("test"),
+        cancel,
+        shell_plugins().await?,
+    );
     let session = tokio::time::timeout(
         Duration::from_secs(5),
         machine.run(&runtime(), "main", &emitter),
@@ -150,26 +191,26 @@ async fn provider_errors_are_detectable_in_the_final_session() -> Result<()> {
     let cancel = CancellationToken::new();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
-    let session = agent(Arc::new(FailingProvider), ModelConfig::new("test"), cancel)
-        .run(&runtime(), "main", &emitter)
-        .await?;
+    let session = agent(
+        Arc::new(FailingProvider),
+        ModelConfig::new("test"),
+        cancel,
+        shell_plugins().await?,
+    )
+    .run(&runtime(), "main", &emitter)
+    .await?;
     assert!(session.conversation.last().unwrap().error_kind().is_some());
     Ok(())
 }
 
 #[tokio::test]
-async fn shell_uses_bash() -> Result<()> {
-    let output = Shell::invoke(
-        &runtime().load("main").await?,
-        ShellInput {
-            command:
-                "[[ -n $BASH_VERSION ]] && values=(hello bash) && printf '%s' \"${values[1]}\""
-                    .into(),
-        },
-    )
-    .await?;
-    assert_eq!(output.exit_code, Some(0));
-    assert_eq!(output.stdout, "bash");
+async fn shell_plugin_uses_bash() -> Result<()> {
+    let plugins = shell_plugins().await?;
+    let output = call_plugin(&plugins, "shell", json!({
+        "command": "[[ -n $BASH_VERSION ]] && values=(hello bash) && printf '%s' \"${values[1]}\""
+    }), CancellationToken::new()).await?;
+    assert_eq!(output["exit_code"], 0);
+    assert_eq!(output["stdout"], "bash");
     Ok(())
 }
 
@@ -196,6 +237,7 @@ async fn chat_keeps_context_with_or_without_initial_arguments() -> Result<()> {
             Duration::from_secs(5),
             chat(
                 &runtime,
+                shell_plugins().await?,
                 provider.clone(),
                 ModelConfig::new("test"),
                 initial,
@@ -232,6 +274,7 @@ async fn chat_waits_without_an_initial_message_and_exits_on_eof() -> Result<()> 
     let task_provider = provider.clone();
     let chat = chat(
         task_runtime,
+        shell_plugins().await?,
         task_provider,
         ModelConfig::new("test"),
         None,
@@ -261,6 +304,7 @@ async fn idle_chat_can_be_cancelled() -> Result<()> {
     let stop = cancel.clone();
     let chat = chat(
         &runtime,
+        shell_plugins().await?,
         provider.clone(),
         ModelConfig::new("test"),
         None,
@@ -288,6 +332,7 @@ async fn provider_failure_does_not_close_chat() -> Result<()> {
     drop(tx);
     chat(
         &runtime,
+        shell_plugins().await?,
         Arc::new(FailingProvider),
         ModelConfig::new("test"),
         Some("first".into()),
@@ -307,3 +352,5 @@ async fn provider_failure_does_not_close_chat() -> Result<()> {
     assert_eq!(session.conversation.len(), 4);
     Ok(())
 }
+
+mod plugin_tests;
