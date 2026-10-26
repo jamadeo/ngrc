@@ -63,16 +63,38 @@ impl Provider for ScriptedProvider {
     }
 }
 
-fn runtime() -> Runtime {
-    Runtime(Mutex::new(Session {
-        conversation: Conversation::new_unvalidated([Message::user().with_text("test")]),
-        cwd: std::env::temp_dir(),
-    }))
+// Keep each test's on-disk log isolated and remove it after closing the store.
+struct TestRuntime {
+    runtime: Option<Runtime>,
+    directory: PathBuf,
+}
+
+impl std::ops::Deref for TestRuntime {
+    type Target = Runtime;
+
+    fn deref(&self) -> &Runtime {
+        self.runtime.as_ref().unwrap()
+    }
+}
+
+impl Drop for TestRuntime {
+    fn drop(&mut self) {
+        drop(self.runtime.take());
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn runtime() -> TestRuntime {
+    let runtime = empty_runtime();
+    runtime
+        .append_message(Message::user().with_text("test"))
+        .unwrap();
+    runtime
 }
 
 #[tokio::test]
 async fn only_shell_is_registered_and_captures_output() -> Result<()> {
-    let session = runtime().load("main").await?;
+    let session = runtime().snapshot();
     let operation = ToolOperation::<Session>::new().with_async_tool::<Shell>();
     let tools = <ToolOperation<Session> as Operation<Session, Effect>>::inference_tools(
         &operation, &session,
@@ -101,7 +123,7 @@ async fn only_shell_is_registered_and_captures_output() -> Result<()> {
     .await?;
     assert_eq!(
         PathBuf::from(output.stdout.trim()),
-        session.cwd.canonicalize()?
+        session.metadata.cwd.canonicalize()?
     );
     Ok(())
 }
@@ -113,9 +135,10 @@ async fn model_shell_model_loop_completes() -> Result<()> {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
     let machine = agent(provider.clone(), ModelConfig::new("test"), cancel);
+    let runtime = runtime();
     let session = tokio::time::timeout(
         Duration::from_secs(5),
-        machine.run(&runtime(), "main", &emitter),
+        machine.run(&*runtime, &runtime.snapshot().id, &emitter),
     )
     .await??;
     assert_eq!(
@@ -150,8 +173,9 @@ async fn provider_errors_are_detectable_in_the_final_session() -> Result<()> {
     let cancel = CancellationToken::new();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
+    let runtime = runtime();
     let session = agent(Arc::new(FailingProvider), ModelConfig::new("test"), cancel)
-        .run(&runtime(), "main", &emitter)
+        .run(&*runtime, &runtime.snapshot().id, &emitter)
         .await?;
     assert!(session.conversation.last().unwrap().error_kind().is_some());
     Ok(())
@@ -160,7 +184,7 @@ async fn provider_errors_are_detectable_in_the_final_session() -> Result<()> {
 #[tokio::test]
 async fn shell_uses_bash() -> Result<()> {
     let output = Shell::invoke(
-        &runtime().load("main").await?,
+        &runtime().snapshot(),
         ShellInput {
             command:
                 "[[ -n $BASH_VERSION ]] && values=(hello bash) && printf '%s' \"${values[1]}\""
@@ -173,11 +197,21 @@ async fn shell_uses_bash() -> Result<()> {
     Ok(())
 }
 
-fn empty_runtime() -> Runtime {
-    Runtime(Mutex::new(Session {
-        conversation: Conversation::empty(),
-        cwd: std::env::temp_dir(),
-    }))
+fn empty_runtime() -> TestRuntime {
+    let directory = std::env::temp_dir().join(format!("ngrc-test-{}", uuid::Uuid::new_v4()));
+    let store = SessionStore::create(
+        &directory,
+        SessionMetadata {
+            cwd: std::env::temp_dir(),
+            provider: "scripted".into(),
+            model: "test".into(),
+        },
+    )
+    .unwrap();
+    TestRuntime {
+        runtime: Some(Runtime(Mutex::new(store))),
+        directory,
+    }
 }
 
 #[tokio::test]
@@ -204,7 +238,7 @@ async fn chat_keeps_context_with_or_without_initial_arguments() -> Result<()> {
             ),
         )
         .await??;
-        let session = runtime.load("main").await?;
+        let session = runtime.snapshot();
         assert_eq!(
             session.conversation.last().unwrap().as_concat_text(),
             "follow-up done"
@@ -247,7 +281,7 @@ async fn chat_waits_without_an_initial_message_and_exits_on_eof() -> Result<()> 
     tx.send(Ok(" \t".into())).await?;
     drop(tx);
     tokio::time::timeout(Duration::from_secs(1), chat).await??;
-    assert!(runtime.load("main").await?.conversation.is_empty());
+    assert!(runtime.snapshot().conversation.is_empty());
     assert_eq!(provider.0.load(Ordering::SeqCst), 0);
     Ok(())
 }
@@ -295,7 +329,7 @@ async fn provider_failure_does_not_close_chat() -> Result<()> {
         CancellationToken::new(),
     )
     .await?;
-    let session = runtime.load("main").await?;
+    let session = runtime.snapshot();
     assert_eq!(
         session
             .conversation
@@ -305,5 +339,100 @@ async fn provider_failure_does_not_close_chat() -> Result<()> {
         2
     );
     assert_eq!(session.conversation.len(), 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_chat_restores_shell_results_and_appends_follow_up() -> Result<()> {
+    let mut runtime = runtime();
+    let provider = Arc::new(ScriptedProvider(AtomicUsize::new(0)));
+    run_turn(
+        &runtime,
+        provider.clone(),
+        ModelConfig::new("test"),
+        CancellationToken::new(),
+    )
+    .await?;
+    let path = runtime.0.lock().unwrap().path.clone();
+    let before = std::fs::read(&path)?;
+    let expected = runtime.snapshot();
+    drop(runtime.runtime.take());
+
+    let store = SessionStore::open(&path)?;
+    assert_eq!(store.session.conversation, expected.conversation);
+    assert_eq!(store.session.usage.len(), 2);
+    runtime.runtime = Some(Runtime(Mutex::new(store)));
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    drop(tx);
+    chat(
+        &runtime,
+        provider.clone(),
+        ModelConfig::new("test"),
+        Some("follow up".into()),
+        rx,
+        CancellationToken::new(),
+    )
+    .await?;
+    assert!(std::fs::read(&path)?.starts_with(&before));
+    let expected = runtime.snapshot();
+    assert_eq!(expected.id, expected.id());
+    assert_eq!(expected.usage.len(), 3);
+    assert_eq!(
+        expected.conversation.last().unwrap().as_concat_text(),
+        "follow-up done"
+    );
+    drop(runtime.runtime.take());
+    let reopened = SessionStore::open(&path)?;
+    assert_eq!(reopened.session.conversation, expected.conversation);
+    assert_eq!(reopened.session.usage.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_loader_rejects_other_session_ids() -> Result<()> {
+    let runtime = runtime();
+    let session = runtime.snapshot();
+    assert_eq!(runtime.load(&session.id).await?.id, session.id);
+    assert!(runtime.load("not-this-session").await.is_err());
+    let mut other = session.clone();
+    other.id = "another-session".into();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let emitter = Emitter::new(tx, CancellationToken::new());
+    assert!(runtime
+        .apply_effects(&other, &mut [], &emitter)
+        .await
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn parses_session_options_without_changing_prompt_arguments() -> Result<()> {
+    fn parse(args: &[&str]) -> Result<Options> {
+        Options::parse(args.iter().map(|arg| (*arg).to_owned()))
+    }
+    assert!(parse(&[])?.initial.is_none());
+    assert!(parse(&["--help"])?.help);
+    let options = parse(&["--session-dir", "a directory", "hello", "world"])?;
+    assert_eq!(options.directory, Some(PathBuf::from("a directory")));
+    assert_eq!(options.initial.as_deref(), Some("hello world"));
+    let options = parse(&["--resume", "saved.jsonl", "--", "--help"])?;
+    assert_eq!(options.resume, Some(PathBuf::from("saved.jsonl")));
+    assert_eq!(options.initial.as_deref(), Some("--help"));
+    // Everything after the first prompt word remains prompt text.
+    assert_eq!(
+        parse(&["hello", "--resume"])?.initial.as_deref(),
+        Some("hello --resume")
+    );
+    for args in [
+        vec!["--resume"],
+        vec!["--session-dir"],
+        vec!["--resume", ""],
+        vec!["--unknown"],
+        vec!["--resume", "a.jsonl", "--resume", "b.jsonl"],
+        vec!["--session-dir", "a", "--session-dir", "b"],
+        vec!["--session-dir", "a", "--resume", "b.jsonl"],
+    ] {
+        assert!(parse(&args).is_err(), "should reject {args:?}");
+    }
     Ok(())
 }
