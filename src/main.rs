@@ -130,7 +130,7 @@ impl EffectHandler<Session, Effect> for Runtime {
         store.append(records)?;
         for effect in effects {
             if let Effect::Usage(usage) = effect {
-                eprintln!("{usage:?}");
+                # eprintln!("{usage:?}");
             }
         }
         Ok(())
