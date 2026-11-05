@@ -436,3 +436,95 @@ fn parses_session_options_without_changing_prompt_arguments() -> Result<()> {
     }
     Ok(())
 }
+
+struct McpProvider(AtomicUsize);
+
+#[async_trait]
+impl Provider for McpProvider {
+    fn get_name(&self) -> &str {
+        "mcp-test"
+    }
+
+    async fn stream(
+        &self,
+        _: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<MessageStream, ProviderError> {
+        assert!(system.contains("fixture instructions"));
+        assert_eq!(tools.len(), 2);
+        let remote = tools.iter().find(|tool| tool.name != "shell").unwrap();
+        let message = if self.0.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+            Message::assistant().with_tool_request(
+                "mcp-1",
+                Ok(CallToolRequestParams::new(remote.name.to_string())),
+            )
+        } else {
+            assert!(messages
+                .iter()
+                .any(|message| format!("{message:?}").contains("mcp-fixture-ok")));
+            Message::assistant().with_text("MCP done")
+        };
+        Ok(stream_from_single_message(
+            message,
+            ProviderUsage::new("test".into(), Default::default()),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn stdio_mcp_tools_execute_and_connection_survives_turns() -> Result<()> {
+    let runtime = runtime();
+    let script = runtime.directory.join("server.py");
+    std::fs::write(
+        &script,
+        r#"
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    method = request['method']
+    if method == 'initialize':
+        result = {'protocolVersion': request['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'fixture', 'version': '1'}, 'instructions': 'fixture instructions'}
+    elif method == 'tools/list':
+        result = {'tools': [{'name': 'hello', 'description': 'hello', 'inputSchema': {'type': 'object', 'properties': {}}}]}
+    elif method == 'tools/call':
+        result = {'content': [{'type': 'text', 'text': 'mcp-fixture-ok'}]}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+"#,
+    )?;
+    let path = runtime.directory.join("mcp.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({"mcpServers": {
+            "fixture": {"type": "stdio", "command": "python3", "args": [script]}
+        }}))?,
+    )?;
+    let cancel = CancellationToken::new();
+    let session = runtime.snapshot();
+    let lease = mcp::connect(&path, &session.metadata.cwd, &session.id, cancel.clone()).await?;
+    let provider = Arc::new(McpProvider(AtomicUsize::new(0)));
+    for turn in 0..2 {
+        if turn > 0 {
+            runtime.append_message(Message::user().with_text("again"))?;
+        }
+        let session = run_turn_with_mcp(
+            &runtime,
+            provider.clone(),
+            ModelConfig::new("test"),
+            cancel.clone(),
+            Some(lease.clone()),
+        )
+        .await?;
+        assert_eq!(
+            session.conversation.last().unwrap().as_concat_text(),
+            "MCP done"
+        );
+    }
+    assert_eq!(provider.0.load(Ordering::SeqCst), 4);
+    Ok(())
+}

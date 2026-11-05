@@ -1,13 +1,12 @@
 # ngrc
 
 A minimal Rust coding agent built with the Goose GDK. An interactive chat with
-one persistent conversation and exactly one tool: `shell`. Each session is stored
+one persistent conversation, a built-in `shell` tool, and optional MCP tools. Each session is stored
 in an append-only `.jsonl` file, including its metadata.
 
 The GDK handles inference, tool dispatch, and the model/tool loop. This application
 supplies a file-backed session, system prompt, and a `/bin/bash -c` tool. The initial
-backend is OpenAI; there is no Goose CLI configuration dependency or MCP server
-process. Requires Rust 1.94.1+ and `/bin/bash` (macOS/Linux).
+backend is OpenAI; there is no Goose CLI configuration dependency. Requires Rust 1.94.1+ and `/bin/bash` (macOS/Linux).
 
 ## Running this project
 
@@ -32,7 +31,7 @@ directory when the session was created). Each shell call is independent:
 `cd` and shell variables do not persist. stdout, stderr, and exit status are returned
 to the model; commands are logged to stderr and assistant text streams to stdout.
 The chat has a simple line prompt, but shell commands have no interactive terminal.
-No other tools are included.
+Additional tools are available when an MCP config is supplied.
 
 **Warning:** commands execute immediately, with your user permissions and inherited
 environment (including credentials). There is no approval prompt, filesystem/network
@@ -44,6 +43,49 @@ shell process is killed when dropped, but descendant processes are not reliably
 terminated. Output is buffered without a size cap. There is no model-turn/cost limit
 or context compaction. These are deliberate prototype limitations, not production
 safety guarantees.
+
+## MCP connections
+
+Pass `--mcp-config FILE` before the optional prompt. Without this option, only
+`shell` is exposed. The file uses this project's JSON schema (not Goose CLI config):
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "/absolute/path/to/mcp-server",
+      "args": ["--example"],
+      "env": {"EXAMPLE_KEY": "value"}
+    },
+    "remote": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {"Authorization": "Bearer replace-me"}
+    }
+  }
+}
+```
+
+`args`, `env`, and `headers` are optional. `type` is required and must be `stdio`
+or `http`; HTTP means Streamable HTTP, not legacy SSE. Unknown fields are rejected.
+Server names must be nonblank. GDK prefixes tool names by server and rejects
+collisions. Connections and the discovered catalog remain alive across turns.
+Server instructions are included in the system prompt. Configuration is read once
+at startup; it is not stored in the session log. Supply it again when resuming.
+
+Stdio commands run directly (not through a shell), in the session's working
+directory, with inherited environment plus configured overrides. Server stderr
+is inherited; stdout is reserved for MCP. HTTP supports explicit headers, but no
+OAuth flow, credential lookup, or environment-variable interpolation. Protect
+config files containing credentials. Startup fails on invalid config, connection,
+or discovery errors instead of silently omitting configured tools. Initialization
+and MCP requests use a 30-second timeout; Ctrl-C cancels connection startup too.
+
+**Trust warning:** configured programs and MCP tool calls execute without approval
+or sandboxing. Only connect trusted servers. Dropping connections closes transports;
+process-tree cleanup is not guaranteed. Dynamic reconnection/catalog reload is not
+implemented.
 
 ## Session storage
 
@@ -98,14 +140,19 @@ prior shell results, optional initial input, blank lines, EOF, idle cancellation
 and retrying after provider errors. Storage tests cover byte-prefix preservation,
 metadata and usage round trips, message-delta replay, exclusive locks, failed
 writes, corrupt/incomplete logs, and resuming a model → shell → model conversation.
+MCP tests cover config parsing and a real local stdio server through a fake
+model → MCP tool → model loop across two turns. They require `python3`.
+Streamable HTTP compiles but has not been exercised against a live server.
 No paid/live model call is required for tests. Authenticated live inference has
 not been tested.
 
 ## GDK notes / gaps
 
-Pinned to the published `0.1.0-alpha.12` versions of `goose-agent`,
-`goose-providers`, and `goose-provider-types`, with `Cargo.lock` checked into the
-project. `goose-providers` explicitly enables `rustls-tls` for HTTPS.
+Uses the unpublished local `goose-agent` crate at `../goose/crates/goose-agent`
+with `mcp-stdio` and `mcp-http`. The provider crates also use sibling paths to
+keep their shared alpha.13 types compatible. `Cargo.lock` is checked in;
+`goose-providers` and the MCP HTTP client enable Rustls HTTPS support.
+The sibling goose checkout must be present to build.
 
 No missing GDK feature blocked this minimal implementation. A few assembly details
 are worth recording rather than building a framework around them:
@@ -122,8 +169,9 @@ are worth recording rather than building a framework around them:
 - Tool approval, shell isolation, bounded output, process-tree cleanup, and a run
   budget are not supplied by this minimal assembly. They remain unimplemented here;
   this is not a claim that no other GDK component can help with them.
-- The official documentation map did not list GDK component API documentation.
-  The crate APIs were verified against the pinned published source and compile/tests.
+- The unpublished MCP APIs were verified against the sibling crate source and
+  compile/tests; the official [GDK reference](https://goose-docs.ai/docs/gdk/reference/)
+  describes the component architecture.
 
 ### Verification Completed — references
 
@@ -139,7 +187,8 @@ Session lifecycle context was checked against
 [Session Management](https://goose-docs.ai/docs/guides/sessions/session-management).
 This project's JSONL schema and session flags are its own, not Goose CLI behavior.
 
-Pinned component API references (source, not assumptions about the Goose CLI):
+Historical component API references for the original alpha.12 implementation
+(the current build uses the sibling alpha.13 source):
 
 - [`goose-agent` README](https://github.com/aaif-goose/goose/blob/4811ae25f736fdf0ede847449c060e96645426b5/crates/goose-agent/README.md)
 - [`goose-agent` inference](https://github.com/aaif-goose/goose/blob/4811ae25f736fdf0ede847449c060e96645426b5/crates/goose-agent/src/inference.rs)

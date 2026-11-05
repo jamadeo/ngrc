@@ -9,9 +9,9 @@ publish = false
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-goose-agent = "=0.1.0-alpha.12"
-goose-provider-types = "=0.1.0-alpha.12"
-goose-providers = { version = "=0.1.0-alpha.12", features = ["rustls-tls"] }
+goose-agent = { path = "../goose/crates/goose-agent", features = ["mcp-stdio", "mcp-http"] }
+goose-provider-types = { path = "../goose/crates/goose-provider-types" }
+goose-providers = { path = "../goose/crates/goose-providers", features = ["rustls-tls"] }
 rmcp = { version = "=3.4.1", default-features = false, features = ["schemars", "server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -19,3 +19,4 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "time"] }
 tokio-util = "0.7"
+reqwest = { version = "0.13.2", default-features = false, features = ["rustls"] }
