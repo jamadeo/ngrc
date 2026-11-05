@@ -3,8 +3,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use goose_agent::mcp::{
-    ClientOptions, Connector, HttpConnector, Lease, Manager, Registration, StartupPolicy,
-    StderrPolicy, StdioConnector,
+    ClientOptions, HttpConnector, Lease, Registration, StartupPolicy, StderrPolicy, StdioConnector,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -61,7 +60,7 @@ pub(crate) async fn connect(
             timeout: Duration::from_secs(30),
             ..Default::default()
         };
-        let connector: Arc<dyn Connector> = match server {
+        let registration = match server {
             Server::Stdio { command, args, env } => {
                 let mut connector = StdioConnector::new(command, options)
                     .with_context(|| format!("MCP server {name}"))?;
@@ -70,18 +69,19 @@ pub(crate) async fn connect(
                 connector.inherit_env = true;
                 connector.cwd = Some(cwd.to_path_buf());
                 connector.stderr = StderrPolicy::Inherit;
-                Arc::new(connector)
+                Registration::stdio(name, connector)
             }
-            Server::Http { url, headers } => Arc::new(
+            Server::Http { url, headers } => Registration::http(
+                name.clone(),
                 HttpConnector::new(&url, headers, options)
                     .with_context(|| format!("MCP server {name}"))?,
             ),
         };
-        registrations.push(Registration::new(name, 0, connector));
+        registrations.push(registration);
     }
-    let lease = Arc::new(Manager::new().resolve(scope, registrations).await?);
-    lease.ready(StartupPolicy::Strict, cancel).await?;
-    Ok(lease)
+    Ok(Arc::new(
+        Lease::connect(scope, registrations, StartupPolicy::Strict, cancel).await?,
+    ))
 }
 
 #[cfg(test)]
