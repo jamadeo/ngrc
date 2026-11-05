@@ -112,6 +112,8 @@ The versioned log contains one JSON object per line, with a `type` field:
 - `message`: a `message` containing user input, an assistant response, a tool
   request/result, or a message metadata update.
 - `usage`: a provider `usage` record, preserved rather than discarded.
+- `tool_request_meta`: a tool-call ID (`tool_call_id`) and object `patch`, merged
+  into request metadata during replay (including executable-state decisions).
 
 The app only appends: it never rewrites, truncates, or compacts a session, and has
 no mutable metadata sidecar or database. Replaying records reconstructs the current
@@ -169,7 +171,8 @@ are worth recording rather than building a framework around them:
   result. The CLI renders these and returns to the prompt for a follow-up/retry.
 - Each turn builds a fresh machine around the same file-backed session. In-process
   loads clone the persisted in-memory view; reopening replays the append-only log.
-- Tool approval, shell isolation, bounded output, process-tree cleanup, and a run
+- An explicit allow-all tool policy preserves immediate execution; it is not an
+  interactive approval gate. Shell isolation, bounded output, process-tree cleanup, and a run
   budget are not supplied by this minimal assembly. They remain unimplemented here;
   this is not a claim that no other GDK component can help with them.
 - The unpublished MCP APIs were verified against the sibling crate source and

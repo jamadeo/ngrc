@@ -229,3 +229,55 @@ fn failed_writes_do_not_change_memory_or_allow_further_appends() -> Result<()> {
         .is_err());
     Ok(())
 }
+
+#[test]
+fn tool_request_metadata_patches_append_and_replay() -> Result<()> {
+    let directory = Directory::new();
+    let mut store = directory.create()?;
+    store.append(vec![Record::Message {
+        message: Message::assistant().with_tool_request(
+            "call-1",
+            Ok(rmcp::model::CallToolRequestParams::new("shell")),
+        ),
+    }])?;
+    let path = store.path.clone();
+    let before = fs::read(&path)?;
+    for patch in [
+        serde_json::json!({"binding": "keep"}),
+        serde_json::json!({"goose.executable": true}),
+    ] {
+        store.append(vec![Record::ToolRequestMeta {
+            tool_call_id: "call-1".into(),
+            patch,
+        }])?;
+    }
+    let expected = store.session.conversation.clone();
+    let request = expected
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|content| {
+            if let MessageContent::ToolRequest(request) = content {
+                Some(request)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        request.tool_meta,
+        Some(serde_json::json!({"binding":"keep", "goose.executable":true}))
+    );
+    assert!(fs::read(&path)?.starts_with(&before));
+    let committed = fs::read(&path)?;
+    assert!(store
+        .append(vec![Record::ToolRequestMeta {
+            tool_call_id: "call-1".into(),
+            patch: serde_json::Value::Null
+        }])
+        .is_err());
+    assert_eq!(fs::read(&path)?, committed);
+    drop(store);
+    assert_eq!(SessionStore::open(&path)?.session.conversation, expected);
+    Ok(())
+}

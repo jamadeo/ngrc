@@ -138,6 +138,13 @@ impl EffectHandler<Session, Effect> for Runtime {
                 Effect::Usage(usage) => Ok(Record::Usage {
                     usage: usage.clone(),
                 }),
+                Effect::Conversation(ConversationEffect::PatchToolRequestMeta {
+                    tool_call_id,
+                    patch,
+                }) => Ok(Record::ToolRequestMeta {
+                    tool_call_id: tool_call_id.clone(),
+                    patch: patch.clone(),
+                }),
                 Effect::Conversation(_) => bail!("unsupported MCP conversation mutation"),
             })
             .collect::<Result<Vec<_>>>()?;
@@ -218,6 +225,24 @@ impl InferenceRequestPreparer<Session> for Prompt {
     }
 }
 
+// Explicitly preserve the prototype's no-approval execution policy.
+struct AllowAllTools;
+
+#[async_trait]
+impl goose_agent::tool_approval::ToolApproval<Session> for AllowAllTools {
+    async fn check(
+        &self,
+        _: &Session,
+        _: &Conversation,
+        requests: &[&goose_provider_types::conversation::message::ToolRequest],
+    ) -> Result<Vec<goose_agent::tool_approval::ApprovalDecision>> {
+        Ok(requests
+            .iter()
+            .map(|_| goose_agent::tool_approval::ApprovalDecision::Allow)
+            .collect())
+    }
+}
+
 #[cfg(test)]
 fn agent(
     provider: Arc<dyn Provider>,
@@ -233,9 +258,14 @@ fn agent_with_mcp(
     cancel: CancellationToken,
     mcp: Option<Arc<goose_agent::mcp::Lease>>,
 ) -> StateMachine<'static, Session, Effect> {
-    let mut steps = vec![Step::Operation(Arc::new(
-        ToolOperation::<Session>::new().with_async_tool::<Shell>(),
-    ))];
+    let mut steps = vec![
+        Step::Operation(Arc::new(
+            goose_agent::tool_approval::ToolApprovalOperation::new(Arc::new(AllowAllTools)),
+        )),
+        Step::Operation(Arc::new(
+            ToolOperation::<Session>::new().with_async_tool::<Shell>(),
+        )),
+    ];
     if let Some(lease) = mcp {
         steps.push(Step::Operation(Arc::new(goose_agent::mcp::McpOperation::<
             Session,

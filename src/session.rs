@@ -8,7 +8,9 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use goose_provider_types::conversation::{
-    message::Message, token_usage::ProviderUsage, Conversation,
+    message::{Message, MessageContent},
+    token_usage::ProviderUsage,
+    Conversation,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -62,6 +64,10 @@ pub(crate) enum Record {
     Usage {
         usage: ProviderUsage,
     },
+    ToolRequestMeta {
+        tool_call_id: String,
+        patch: serde_json::Value,
+    },
 }
 
 impl Session {
@@ -71,6 +77,28 @@ impl Session {
             // Preserve GDK delta merging, including metadata-only messages.
             Record::Message { message } => self.conversation.push(message),
             Record::Usage { usage } => self.usage.push(usage),
+            Record::ToolRequestMeta {
+                tool_call_id,
+                patch,
+            } => {
+                for message in self.conversation.messages_mut() {
+                    for content in &mut message.content {
+                        if let MessageContent::ToolRequest(request) = content {
+                            if request.id == tool_call_id {
+                                let meta = request
+                                    .tool_meta
+                                    .get_or_insert_with(|| serde_json::json!({}));
+                                if !meta.is_object() {
+                                    *meta = serde_json::json!({});
+                                }
+                                meta.as_object_mut()
+                                    .unwrap()
+                                    .extend(patch.as_object().unwrap().clone());
+                            }
+                        }
+                    }
+                }
+            }
             Record::Created { .. } => unreachable!("creation is only valid as the first record"),
         }
     }
@@ -208,6 +236,15 @@ fn validate_update(record: &Record) -> Result<()> {
             bail!("session creation must be the first and only creation record")
         }
         Record::Metadata { metadata } => metadata.validate(),
+        Record::ToolRequestMeta {
+            tool_call_id,
+            patch,
+        } => {
+            if tool_call_id.is_empty() || !patch.is_object() {
+                bail!("tool request metadata requires a nonempty ID and an object patch");
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
