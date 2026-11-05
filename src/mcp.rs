@@ -1,8 +1,11 @@
 //! Application-owned JSON config; protocol and tool routing belong to the GDK.
-use std::{collections::BTreeMap, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use goose_agent::mcp::{ClientOptions, Lease, Manager, Registration, TransportClient};
+use goose_agent::mcp::{
+    ClientOptions, Connector, HttpConnector, Lease, Manager, Registration, StartupPolicy,
+    StderrPolicy, StdioConnector,
+};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -35,22 +38,9 @@ fn read_config(path: &Path) -> Result<Config> {
         std::fs::read(path).with_context(|| format!("read MCP config {}", path.display()))?;
     let config: Config = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse MCP config {}", path.display()))?;
-    for (name, server) in &config.servers {
+    for name in config.servers.keys() {
         if name.trim().is_empty() {
             bail!("MCP server name must not be empty");
-        }
-        match server {
-            Server::Stdio { command, .. } if command.trim().is_empty() => {
-                bail!("MCP server {name}: command must not be empty")
-            }
-            Server::Http { url, .. } => {
-                let url = reqwest::Url::parse(url)
-                    .with_context(|| format!("MCP server {name}: invalid URL"))?;
-                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                    bail!("MCP server {name}: URL must use http or https");
-                }
-            }
-            _ => {}
         }
     }
     Ok(config)
@@ -71,48 +61,26 @@ pub(crate) async fn connect(
             timeout: Duration::from_secs(30),
             ..Default::default()
         };
-        let connection = async {
-            match server {
-                Server::Stdio { command, args, env } => {
-                    let mut process = tokio::process::Command::new(command);
-                    process
-                        .args(args)
-                        .envs(env)
-                        .current_dir(cwd)
-                        .stderr(Stdio::inherit())
-                        .kill_on_drop(true);
-                    TransportClient::stdio(process, options).await
-                }
-                Server::Http { url, headers } => {
-                    let mut defaults = reqwest::header::HeaderMap::new();
-                    for (key, value) in headers {
-                        defaults.insert(
-                            reqwest::header::HeaderName::from_bytes(key.as_bytes())?,
-                            reqwest::header::HeaderValue::from_str(&value)?,
-                        );
-                    }
-                    let client = reqwest::Client::builder()
-                        .default_headers(defaults)
-                        .build()?;
-                    TransportClient::http(client,
-                        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url),
-                        options).await
-                }
+        let connector: Arc<dyn Connector> = match server {
+            Server::Stdio { command, args, env } => {
+                let mut connector = StdioConnector::new(command, options)
+                    .with_context(|| format!("MCP server {name}"))?;
+                connector.args = args;
+                connector.env = env;
+                connector.inherit_env = true;
+                connector.cwd = Some(cwd.to_path_buf());
+                connector.stderr = StderrPolicy::Inherit;
+                Arc::new(connector)
             }
+            Server::Http { url, headers } => Arc::new(
+                HttpConnector::new(&url, headers, options)
+                    .with_context(|| format!("MCP server {name}"))?,
+            ),
         };
-        let client = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => bail!("MCP connection cancelled"),
-            result = connection => result.with_context(|| format!("connect MCP server {name}"))?,
-        };
-        registrations.push(Registration::attached(name, 0, Arc::new(client)));
+        registrations.push(Registration::new(name, 0, connector));
     }
     let lease = Arc::new(Manager::new().resolve(scope, registrations).await?);
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => bail!("MCP discovery cancelled"),
-        result = lease.catalog(cancel.clone()) => { result.context("discover MCP tools")?; }
-    }
+    lease.ready(StartupPolicy::Strict, cancel).await?;
     Ok(lease)
 }
 

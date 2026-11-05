@@ -76,11 +76,14 @@ at startup; it is not stored in the session log. Supply it again when resuming.
 
 Stdio commands run directly (not through a shell), in the session's working
 directory, with inherited environment plus configured overrides. Server stderr
-is inherited; stdout is reserved for MCP. HTTP supports explicit headers, but no
+is inherited; stdout is reserved for MCP. GDK builds the lazy connections and
+validates commands, HTTP URLs and headers. HTTP redirects are disabled, and URL
+credentials must instead be supplied as headers. HTTP supports explicit headers, but no
 OAuth flow, credential lookup, or environment-variable interpolation. Protect
 config files containing credentials. Startup fails on invalid config, connection,
 or discovery errors instead of silently omitting configured tools. Initialization
-and MCP requests use a 30-second timeout; Ctrl-C cancels connection startup too.
+and MCP requests use a 30-second timeout; Ctrl-C cancels connection startup and
+discovery. GDK strict readiness requires every configured connection to succeed.
 
 **Trust warning:** configured programs and MCP tool calls execute without approval
 or sandboxing. Only connect trusted servers. Dropping connections closes transports;
