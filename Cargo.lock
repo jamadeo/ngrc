@@ -834,7 +834,6 @@ dependencies = [
 [[package]]
 name = "goose-agent"
 version = "0.1.0-alpha.14"
-source = "git+https://github.com/aaif-goose/goose/?rev=4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f#4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -865,7 +864,6 @@ dependencies = [
 [[package]]
 name = "goose-context-management"
 version = "0.1.0-alpha.14"
-source = "git+https://github.com/aaif-goose/goose/?rev=4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f#4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -881,7 +879,6 @@ dependencies = [
 [[package]]
 name = "goose-provider-types"
 version = "0.1.0-alpha.14"
-source = "git+https://github.com/aaif-goose/goose/?rev=4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f#4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -910,7 +907,6 @@ dependencies = [
 [[package]]
 name = "goose-providers"
 version = "0.1.0-alpha.14"
-source = "git+https://github.com/aaif-goose/goose/?rev=4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f#4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -936,7 +932,6 @@ dependencies = [
 [[package]]
 name = "goose-sdk-types"
 version = "0.1.0-alpha.14"
-source = "git+https://github.com/aaif-goose/goose/?rev=4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f#4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",

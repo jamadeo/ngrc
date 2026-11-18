@@ -7,7 +7,8 @@ in an append-only `.jsonl` file, including its metadata.
 The GDK handles inference, tool dispatch, and the model/tool loop. This application
 supplies a file-backed session, system prompt, and a `/bin/bash -c` tool. The initial
 backend is OpenAI; there is no Goose CLI configuration dependency.
-Requires Rust 1.95.0+ and `/bin/bash` (macOS/Linux).
+Requires Rust 1.95.0+, `/bin/bash` (macOS/Linux), and a local Goose checkout at
+`../goose` (for example, `~/development/goose` alongside `~/development/ngrc`).
 
 ## Running this project
 
@@ -83,8 +84,7 @@ prompt. All tools run without confirmation, just like shell. There is no managem
 UI, hot reload, or automatic package installation.
 
 Configuration is launch-scoped, not saved in the session: pass `--extensions` again
-when resuming. Tool calls/results and execution metadata are saved in the JSONL log.
-Old logs remain readable; older ngrc builds cannot read the new metadata record.
+when resuming. Tool calls and results are saved in the JSONL log.
 
 ## Session storage
 
@@ -107,8 +107,6 @@ The versioned log contains one JSON object per line, with a `type` field:
 - `metadata`: the new complete `metadata` value, applied from that point onward.
 - `message`: a `message` containing user input, an assistant response, a tool
   request/result, or a message metadata update.
-- `tool_request_meta`: a `tool_call_id` and object `patch` recording GDK execution
-  eligibility on an existing tool request. Replayed in order without rewriting history.
 - `usage`: a provider `usage` record, preserved rather than discarded.
 
 The app only appends: it never rewrites, truncates, or compacts a session, and has
@@ -146,16 +144,15 @@ not been tested.
 
 ## GDK notes
 
-The GDK crates are Git dependencies pinned in `Cargo.toml` to a commit from
-[`aaif-goose/goose` main](https://github.com/aaif-goose/goose/tree/main). No local
-Goose checkout is needed. The application uses `rmcp` 3.9.0, and provider and agent
-HTTPS use rustls.
+The GDK crates use path dependencies under `../goose/crates` so the agent and
+provider crates come from the same checkout. The application uses `rmcp` 3.9.0,
+and provider and agent HTTPS use rustls.
 
-The application assembles `StateMachine` with explicit allow-all tool approval,
-the built-in shell, `ExtensionOperation`, unhandled-call handling, and inference.
+The application assembles `StateMachine` with the built-in shell,
+`ExtensionOperation`, unhandled-call handling, and inference.
 `ExtensionManager` owns MCP transport setup, tool catalogs, dispatch, and connection
 lifetimes. The application only supplies a minimal host and launch-scoped source.
-The pinned upstream source and this project's tests are the reference for the
+The local source and this project's tests are the reference for the
 extracted MCP APIs, which are not all covered by the public docs.
 
 ### Verification Completed — references
@@ -169,7 +166,7 @@ Official documentation consulted:
 
 The JSON array wrapper and `--extensions` flag are ngrc-specific, not Goose CLI
 configuration. Transport fields and extracted MCP APIs were checked against the
-pinned upstream `goose-agent` source. Tests cover a real local stdio fixture,
-instructions, environment/cwd, connection reuse, persisted results and metadata,
+local `goose-agent` source. Tests cover a real local stdio fixture,
+instructions, environment/cwd, connection reuse, persisted tool results,
 invalid configurations, and startup failures. These tests require `python3`.
 No paid model request or live remote HTTP server is used in tests.

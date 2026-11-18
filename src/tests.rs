@@ -545,7 +545,6 @@ async fn mcp_tools_run_across_turns_and_results_replay() -> Result<()> {
     drop(runtime.runtime.take());
     let reopened = SessionStore::open(&path)?;
     assert_eq!(reopened.session.conversation, expected.conversation);
-    assert!(std::fs::read_to_string(path)?.contains("tool_request_meta"));
     Ok(())
 }
 

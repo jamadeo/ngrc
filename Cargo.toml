@@ -9,9 +9,9 @@ publish = false
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-goose-agent = { git = "https://github.com/aaif-goose/goose/", rev = "4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f" }
-goose-provider-types = { git = "https://github.com/aaif-goose/goose/", rev = "4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f" }
-goose-providers = { git = "https://github.com/aaif-goose/goose/", rev = "4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f", features = ["rustls-tls"] }
+goose-agent = { path = "../goose/crates/goose-agent" }
+goose-provider-types = { path = "../goose/crates/goose-provider-types" }
+goose-providers = { path = "../goose/crates/goose-providers", features = ["rustls-tls"] }
 rmcp = { version = "=3.9.0", default-features = false, features = ["schemars", "server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

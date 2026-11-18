@@ -15,15 +15,14 @@ use goose_agent::{
         InferenceEffect, InferenceRequestPreparer, InferenceRunner, PreparedInferenceRequest,
     },
     machine::{EffectHandler, MachineSession, SessionLoader, StateMachine, Step},
-    operation::{ConversationEffect, Emitter, InferenceInput, MachineEffect},
+    operation::{Emitter, InferenceInput, MachineEffect},
     tool::ToolOperation,
-    tool_approval::{ApprovalDecision, ToolApproval, ToolApprovalOperation},
     unhandled_tool_calls::UnhandledToolCallsOperation,
 };
 use goose_provider_types::{
     base::Provider,
     conversation::{
-        message::{Message, MessageContent, ToolRequest},
+        message::{Message, MessageContent},
         token_usage::ProviderUsage,
         Conversation,
     },
@@ -62,47 +61,11 @@ impl MachineSession for Session {
 enum Effect {
     Message(Message),
     Usage(ProviderUsage),
-    ToolRequestMeta {
-        tool_call_id: String,
-        patch: serde_json::Value,
-    },
 }
 
 impl From<Message> for Effect {
     fn from(message: Message) -> Self {
         Self::Message(message)
-    }
-}
-
-impl From<ConversationEffect> for Effect {
-    fn from(effect: ConversationEffect) -> Self {
-        match effect {
-            ConversationEffect::AppendMessage(message) => Self::Message(message),
-            ConversationEffect::PatchToolRequestMeta {
-                tool_call_id,
-                patch,
-            } => Self::ToolRequestMeta {
-                tool_call_id,
-                patch,
-            },
-            _ => unreachable!(
-                "the configured pipeline only appends messages and patches tool requests"
-            ),
-        }
-    }
-}
-
-struct AllowAll;
-
-#[async_trait]
-impl ToolApproval<Session> for AllowAll {
-    async fn check(
-        &self,
-        _: &Session,
-        _: &Conversation,
-        requests: &[&ToolRequest],
-    ) -> Result<Vec<ApprovalDecision>> {
-        Ok(requests.iter().map(|_| ApprovalDecision::Allow).collect())
     }
 }
 
@@ -162,13 +125,6 @@ impl EffectHandler<Session, Effect> for Runtime {
             .map(|effect| match effect {
                 Effect::Message(message) => Record::Message {
                     message: message.clone(),
-                },
-                Effect::ToolRequestMeta {
-                    tool_call_id,
-                    patch,
-                } => Record::ToolRequestMeta {
-                    tool_call_id: tool_call_id.clone(),
-                    patch: patch.clone(),
                 },
                 Effect::Usage(usage) => Record::Usage {
                     usage: usage.clone(),
@@ -260,7 +216,6 @@ fn agent(
 ) -> StateMachine<'static, Session, Effect> {
     StateMachine::new(
         vec![
-            Step::Operation(Arc::new(ToolApprovalOperation::new(Arc::new(AllowAll)))),
             Step::Operation(Arc::new(
                 ToolOperation::<Session>::new().with_async_tool::<Shell>(),
             )),
