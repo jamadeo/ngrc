@@ -2,17 +2,17 @@
 name = "ngrc"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.94.1"
-description = "A minimal shell-only coding agent built with the Goose GDK"
+rust-version = "1.95.0"
+description = "A minimal coding agent built with the Goose GDK"
 publish = false
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-goose-agent = "=0.1.0-alpha.12"
-goose-provider-types = "=0.1.0-alpha.12"
-goose-providers = { version = "=0.1.0-alpha.12", features = ["rustls-tls"] }
-rmcp = { version = "=3.4.1", default-features = false, features = ["schemars", "server"] }
+goose-agent = { git = "https://github.com/aaif-goose/goose/", rev = "4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f" }
+goose-provider-types = { git = "https://github.com/aaif-goose/goose/", rev = "4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f" }
+goose-providers = { git = "https://github.com/aaif-goose/goose/", rev = "4ac08c7e38b3f8a752ce6e0f2136ac72a3d4064f", features = ["rustls-tls"] }
+rmcp = { version = "=3.9.0", default-features = false, features = ["schemars", "server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

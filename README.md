@@ -146,17 +146,17 @@ not been tested.
 
 ## GDK notes
 
-This checkout uses local path dependencies on the requested
-`goose-mcps-reworked/crates` source (`0.1.0-alpha.14`), including matching provider
-crates, and `rmcp` 3.9.0. The paths in `Cargo.toml` must exist on your machine.
-`Cargo.lock` is checked in; provider and agent HTTPS use rustls.
+The GDK crates are Git dependencies pinned in `Cargo.toml` to a commit from
+[`aaif-goose/goose` main](https://github.com/aaif-goose/goose/tree/main). No local
+Goose checkout is needed. The application uses `rmcp` 3.9.0, and provider and agent
+HTTPS use rustls.
 
 The application assembles `StateMachine` with explicit allow-all tool approval,
 the built-in shell, `ExtensionOperation`, unhandled-call handling, and inference.
 `ExtensionManager` owns MCP transport setup, tool catalogs, dispatch, and connection
 lifetimes. The application only supplies a minimal host and launch-scoped source.
-The local API source and compile/tests are authoritative for this unreleased MCP
-extraction; the public docs do not yet describe all of these extracted APIs.
+The pinned upstream source and this project's tests are the reference for the
+extracted MCP APIs, which are not all covered by the public docs.
 
 ### Verification Completed — references
 
@@ -169,7 +169,7 @@ Official documentation consulted:
 
 The JSON array wrapper and `--extensions` flag are ngrc-specific, not Goose CLI
 configuration. Transport fields and extracted MCP APIs were checked against the
-requested local `goose-agent` source. Tests cover a real local stdio fixture,
+pinned upstream `goose-agent` source. Tests cover a real local stdio fixture,
 instructions, environment/cwd, connection reuse, persisted results and metadata,
 invalid configurations, and startup failures. These tests require `python3`.
 No paid model request or live remote HTTP server is used in tests.
