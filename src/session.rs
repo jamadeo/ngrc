@@ -8,7 +8,9 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use goose_provider_types::conversation::{
-    message::Message, token_usage::ProviderUsage, Conversation,
+    message::{Message, MessageContent},
+    token_usage::ProviderUsage,
+    Conversation,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -44,7 +46,7 @@ pub(crate) struct Session {
 }
 
 /// Metadata changes and message deltas are events, never edits to earlier lines.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Record {
     Created {
@@ -59,20 +61,51 @@ pub(crate) enum Record {
     Message {
         message: Message,
     },
+    ToolRequestMeta {
+        tool_call_id: String,
+        patch: serde_json::Value,
+    },
     Usage {
         usage: ProviderUsage,
     },
 }
 
 impl Session {
-    fn apply(&mut self, record: Record) {
+    fn apply(&mut self, record: Record) -> Result<()> {
         match record {
+            Record::ToolRequestMeta {
+                tool_call_id,
+                patch,
+            } => {
+                let patch = patch
+                    .as_object()
+                    .context("tool metadata patch must be an object")?;
+                let request = self
+                    .conversation
+                    .messages_mut()
+                    .iter_mut()
+                    .flat_map(|message| &mut message.content)
+                    .find_map(|content| match content {
+                        MessageContent::ToolRequest(request) if request.id == tool_call_id => {
+                            Some(request)
+                        }
+                        _ => None,
+                    })
+                    .context("tool metadata patch references an unknown request")?;
+                let meta = request
+                    .tool_meta
+                    .get_or_insert_with(|| serde_json::json!({}));
+                meta.as_object_mut()
+                    .context("tool metadata must be an object")?
+                    .extend(patch.clone());
+            }
             Record::Metadata { metadata } => self.metadata = metadata,
             // Preserve GDK delta merging, including metadata-only messages.
             Record::Message { message } => self.conversation.push(message),
             Record::Usage { usage } => self.usage.push(usage),
             Record::Created { .. } => unreachable!("creation is only valid as the first record"),
         }
+        Ok(())
     }
 }
 
@@ -169,11 +202,13 @@ impl SessionStore {
         for record in &records {
             validate_update(record)?;
         }
-        self.write_records(&records)?;
-        // Do not expose unpersisted state if a write or sync failed.
-        for record in records {
-            self.session.apply(record);
+        // Validate stateful patches before writing, then publish only after sync.
+        let mut updated = self.session.clone();
+        for record in &records {
+            updated.apply(record.clone())?;
         }
+        self.write_records(&records)?;
+        self.session = updated;
         Ok(())
     }
 
@@ -231,7 +266,7 @@ fn replay(file: &File) -> Result<Session> {
             .with_context(|| format!("invalid session record at line {line}"))?;
         if let Some(session) = session.as_mut() {
             validate_update(&record).with_context(|| format!("invalid record at line {line}"))?;
-            session.apply(record);
+            session.apply(record)?;
         } else {
             let Record::Created {
                 version,

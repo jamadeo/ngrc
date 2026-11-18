@@ -229,3 +229,24 @@ fn failed_writes_do_not_change_memory_or_allow_further_appends() -> Result<()> {
         .is_err());
     Ok(())
 }
+
+#[test]
+fn invalid_tool_metadata_patches_do_not_append() -> Result<()> {
+    let directory = Directory::new();
+    let mut store = directory.create()?;
+    let before = fs::read(&store.path)?;
+    for patch in [
+        serde_json::json!({"goose.executable": true}),
+        serde_json::json!(null),
+    ] {
+        assert!(store
+            .append(vec![Record::ToolRequestMeta {
+                tool_call_id: "missing".into(),
+                patch,
+            }])
+            .is_err());
+        assert_eq!(fs::read(&store.path)?, before);
+        assert!(store.session.conversation.is_empty());
+    }
+    Ok(())
+}
