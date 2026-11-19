@@ -1,6 +1,6 @@
 use super::*;
-use goose_agent::operation::Operation;
-use goose_provider_types::{
+use oi_kit_agent::operation::Operation;
+use oi_kit_provider_types::{
     base::{stream_from_single_message, MessageStream},
     errors::ProviderError,
 };
@@ -29,7 +29,7 @@ impl Provider for ScriptedProvider {
             0 => Message::assistant().with_tool_request(
                 "shell-1",
                 Ok(CallToolRequestParams::new("shell").with_arguments(
-                    [("command".into(), "printf gdk-shell-ok".into())]
+                    [("command".into(), "printf oi-kit-shell-ok".into())]
                         .into_iter()
                         .collect(),
                 )),
@@ -39,7 +39,7 @@ impl Provider for ScriptedProvider {
                     .iter()
                     .find(|message| message.get_tool_response_ids().contains(&"shell-1"))
                     .expect("shell response must be returned to the model");
-                assert!(format!("{response:?}").contains("gdk-shell-ok"));
+                assert!(format!("{response:?}").contains("oi-kit-shell-ok"));
                 Message::assistant().with_text("done")
             }
             2 => {
@@ -51,7 +51,7 @@ impl Provider for ScriptedProvider {
                     .iter()
                     .find(|message| message.get_tool_response_ids().contains(&"shell-1"))
                     .expect("previous shell result must remain in context");
-                assert!(format!("{response:?}").contains("gdk-shell-ok"));
+                assert!(format!("{response:?}").contains("oi-kit-shell-ok"));
                 Message::assistant().with_text("follow-up done")
             }
             n => panic!("unexpected provider call {n}"),
@@ -143,7 +143,7 @@ async fn model_shell_model_loop_completes() -> Result<()> {
     let runtime = runtime();
     let session = tokio::time::timeout(
         Duration::from_secs(5),
-        machine.run(&*runtime, &runtime.snapshot().id, &emitter),
+        machine.run(&*runtime, &runtime.session_id(), &emitter),
     )
     .await??;
     assert_eq!(
@@ -185,7 +185,7 @@ async fn provider_errors_are_detectable_in_the_final_session() -> Result<()> {
         cancel,
         Arc::new(Extensions::load(None)?),
     )
-    .run(&*runtime, &runtime.snapshot().id, &emitter)
+    .run(&*runtime, &runtime.session_id(), &emitter)
     .await?;
     assert!(session.conversation.last().unwrap().error_kind().is_some());
     Ok(())
@@ -537,7 +537,7 @@ async fn mcp_tools_run_across_turns_and_results_replay() -> Result<()> {
         ),
     )
     .await?;
-    runtime.1.release(&runtime.snapshot().id).await;
+    runtime.1.release(&runtime.session_id()).await;
     result?;
     assert_eq!(provider.0.load(Ordering::SeqCst), 4);
     let expected = runtime.snapshot();
@@ -571,7 +571,7 @@ async fn extension_config_and_startup_errors_are_actionable() -> Result<()> {
     )?;
     let extensions = Extensions::load(Some(&path))?;
     let error = extensions.start(&runtime.snapshot()).await.unwrap_err();
-    extensions.release(&runtime.snapshot().id).await;
+    extensions.release(&runtime.session_id()).await;
     assert!(error.to_string().contains("start extension 'broken'"));
     Ok(())
 }

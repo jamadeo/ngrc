@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use goose_agent::{
+use oi_kit_agent::{
     events::AgentEvent,
     inference::{
         InferenceEffect, InferenceRequestPreparer, InferenceRunner, PreparedInferenceRequest,
@@ -19,7 +19,7 @@ use goose_agent::{
     tool::ToolOperation,
     unhandled_tool_calls::UnhandledToolCallsOperation,
 };
-use goose_provider_types::{
+use oi_kit_provider_types::{
     base::Provider,
     conversation::{
         message::{Message, MessageContent},
@@ -28,7 +28,7 @@ use goose_provider_types::{
     },
     model::ModelConfig,
 };
-use goose_providers::{
+use oi_kit_providers::{
     api_client::{ApiClient, AuthMethod},
     openai::OpenAiProvider,
 };
@@ -86,6 +86,10 @@ impl MachineEffect for Effect {
 struct Runtime(Mutex<SessionStore>, Arc<Extensions>);
 
 impl Runtime {
+    fn session_id(&self) -> String {
+        self.0.lock().unwrap().session.id.clone()
+    }
+
     fn snapshot(&self) -> Session {
         self.0.lock().unwrap().session.clone()
     }
@@ -219,7 +223,7 @@ fn agent(
             Step::Operation(Arc::new(
                 ToolOperation::<Session>::new().with_async_tool::<Shell>(),
             )),
-            Step::Operation(Arc::new(goose_agent::mcp::ExtensionOperation::new(
+            Step::Operation(Arc::new(oi_kit_agent::mcp::ExtensionOperation::new(
                 extensions,
             ))),
             Step::Operation(Arc::new(UnhandledToolCallsOperation::new())),
@@ -275,8 +279,8 @@ async fn run_turn(
         Ok::<_, io::Error>(())
     });
     let machine = agent(provider, model, cancel, runtime.1.clone());
-    // Await the run even on cancellation so the GDK can finalize tool responses.
-    let id = runtime.snapshot().id;
+    // Await the run even on cancellation so oi-kit can finalize tool responses.
+    let id = runtime.session_id();
     let result = machine.run(runtime, &id, &emitter).await;
     drop(emitter);
     display.await??;
@@ -482,7 +486,7 @@ async fn main() -> Result<()> {
         .await
     }
     .await;
-    extensions.release(&runtime.snapshot().id).await;
+    extensions.release(&runtime.session_id()).await;
     ctrl_c.abort();
     result?;
     if cancel.is_cancelled() {

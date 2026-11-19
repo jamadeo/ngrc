@@ -1,9 +1,9 @@
-//! Explicit, launch-scoped MCP configuration; the GDK owns transports and dispatch.
+//! Explicit, launch-scoped MCP configuration; oi-kit owns transports and dispatch.
 use std::{path::Path, sync::Arc};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use goose_agent::{
+use oi_kit_agent::{
     action_required_manager::ActionRequiredManager,
     extension::{name_to_key, ExtensionConfig},
     mcp::{

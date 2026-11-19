@@ -1,14 +1,14 @@
 # ngrc
 
-A minimal Rust coding agent built with the Goose GDK. An interactive chat with
+A minimal Rust coding agent built with oi-kit. It provides an interactive chat with
 one persistent conversation, a `shell` tool, and optional MCP extensions. Each session is stored
 in an append-only `.jsonl` file, including its metadata.
 
-The GDK handles inference, tool dispatch, and the model/tool loop. This application
+oi-kit handles inference, tool dispatch, and the model/tool loop. This application
 supplies a file-backed session, system prompt, and a `/bin/bash -c` tool. The initial
 backend is OpenAI; there is no Goose CLI configuration dependency.
-Requires Rust 1.95.0+, `/bin/bash` (macOS/Linux), and a local Goose checkout at
-`../goose` (for example, `~/development/goose` alongside `~/development/ngrc`).
+Requires Rust 1.95.0+ and `/bin/bash` (macOS/Linux). Cargo downloads oi-kit from
+crates.io; no local Goose checkout is needed.
 
 ## Running this project
 
@@ -48,7 +48,7 @@ safety guarantees.
 
 ## MCP extensions (MVP)
 
-Pass `--extensions FILE` before the optional prompt to load a JSON array of GDK
+Pass `--extensions FILE` before the optional prompt to load a JSON array of oi-kit
 transport configurations. Nothing is auto-discovered, installed, or enabled.
 For example, a file can contain:
 
@@ -74,7 +74,7 @@ For example, a file can contain:
 Only include servers you trust. Stdio commands are executed directly, not through
 Bash; their default working directory is the saved session cwd. An optional `cwd`
 must be absolute. Processes inherit the CLI environment; `envs` supplies overrides
-subject to GDK filtering. HTTP `headers` can supply authentication; this MVP has no
+subject to oi-kit filtering. HTTP `headers` can supply authentication; this MVP has no
 OAuth login flow or secret store. Do not commit credentials.
 
 Servers start at launch; an initialization failure stops the CLI with an error.
@@ -139,34 +139,19 @@ prior shell results, optional initial input, blank lines, EOF, idle cancellation
 and retrying after provider errors. Storage tests cover byte-prefix preservation,
 metadata and usage round trips, message-delta replay, exclusive locks, failed
 writes, corrupt/incomplete logs, and resuming a model → shell → model conversation.
-No paid/live model call is required for tests. Authenticated live inference has
-not been tested.
+MCP tests use a local stdio fixture and require `python3`. No paid/live model call
+or remote MCP server is required. Authenticated live inference has not been tested.
 
-## GDK notes
+## oi-kit notes
 
-The GDK crates use path dependencies under `../goose/crates` so the agent and
-provider crates come from the same checkout. The application uses `rmcp` 3.9.0,
-and provider and agent HTTPS use rustls.
+The application uses [`oi-kit-agent`](https://crates.io/crates/oi-kit-agent),
+[`oi-kit-provider-types`](https://crates.io/crates/oi-kit-provider-types), and
+[`oi-kit-providers`](https://crates.io/crates/oi-kit-providers) from crates.io.
+It uses `rmcp` 3.9.0 and rustls for provider and agent HTTPS.
 
 The application assembles `StateMachine` with the built-in shell,
 `ExtensionOperation`, unhandled-call handling, and inference.
 `ExtensionManager` owns MCP transport setup, tool catalogs, dispatch, and connection
 lifetimes. The application only supplies a minimal host and launch-scoped source.
-The local source and this project's tests are the reference for the
-extracted MCP APIs, which are not all covered by the public docs.
-
-### Verification Completed — references
-
-Official documentation consulted:
-
-- [Using Extensions](https://goose-docs.ai/docs/getting-started/using-extensions)
-  — MCP architecture and stdio/streamable HTTP extension context.
-- [Operations](https://goose-docs.ai/docs/gdk/concepts/operations)
-  — operation ordering and tool/prompt contributions to inference.
-
-The JSON array wrapper and `--extensions` flag are ngrc-specific, not Goose CLI
-configuration. Transport fields and extracted MCP APIs were checked against the
-local `goose-agent` source. Tests cover a real local stdio fixture,
-instructions, environment/cwd, connection reuse, persisted tool results,
-invalid configurations, and startup failures. These tests require `python3`.
-No paid model request or live remote HTTP server is used in tests.
+The [oi-kit-agent API docs](https://docs.rs/oi-kit-agent) and this project's tests
+are the reference for the MCP APIs used here.

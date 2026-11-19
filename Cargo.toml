@@ -3,15 +3,15 @@ name = "ngrc"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95.0"
-description = "A minimal coding agent built with the Goose GDK"
+description = "A minimal coding agent built with oi-kit"
 publish = false
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-goose-agent = { path = "../goose/crates/goose-agent" }
-goose-provider-types = { path = "../goose/crates/goose-provider-types" }
-goose-providers = { path = "../goose/crates/goose-providers", features = ["rustls-tls"] }
+oi-kit-agent = "0.1.0-alpha.15"
+oi-kit-provider-types = "0.1.0-alpha.15"
+oi-kit-providers = { version = "0.1.0-alpha.15", features = ["rustls-tls"] }
 rmcp = { version = "=3.9.0", default-features = false, features = ["schemars", "server"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
