@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use goose_agent::{
+use oi_kit_agent::{
     events::AgentEvent,
     inference::{
         InferenceEffect, InferenceRequestPreparer, InferenceRunner, PreparedInferenceRequest,
@@ -17,8 +17,9 @@ use goose_agent::{
     machine::{EffectHandler, MachineSession, SessionLoader, StateMachine, Step},
     operation::{Emitter, InferenceInput, MachineEffect},
     tool::ToolOperation,
+    unhandled_tool_calls::UnhandledToolCallsOperation,
 };
-use goose_provider_types::{
+use oi_kit_provider_types::{
     base::Provider,
     conversation::{
         message::{Message, MessageContent},
@@ -27,7 +28,7 @@ use goose_provider_types::{
     },
     model::ModelConfig,
 };
-use goose_providers::{
+use oi_kit_providers::{
     api_client::{ApiClient, AuthMethod},
     openai::OpenAiProvider,
 };
@@ -38,6 +39,9 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+
+mod extensions;
+use extensions::Extensions;
 
 mod session;
 use session::{Record, Session, SessionMetadata, SessionStore};
@@ -79,9 +83,13 @@ impl MachineEffect for Effect {
     }
 }
 
-struct Runtime(Mutex<SessionStore>);
+struct Runtime(Mutex<SessionStore>, Arc<Extensions>);
 
 impl Runtime {
+    fn session_id(&self) -> String {
+        self.0.lock().unwrap().session.id.clone()
+    }
+
     fn snapshot(&self) -> Session {
         self.0.lock().unwrap().session.clone()
     }
@@ -128,11 +136,6 @@ impl EffectHandler<Session, Effect> for Runtime {
             })
             .collect();
         store.append(records)?;
-        for effect in effects {
-            if let Effect::Usage(usage) = effect {
-                # eprintln!("{usage:?}");
-            }
-        }
         Ok(())
     }
 }
@@ -199,7 +202,10 @@ impl InferenceRequestPreparer<Session> for Prompt {
         input: InferenceInput,
     ) -> Result<PreparedInferenceRequest> {
         Ok(PreparedInferenceRequest {
-            system_prompt: SYSTEM_PROMPT.into(),
+            system_prompt: std::iter::once(SYSTEM_PROMPT.to_owned())
+                .chain(input.prompt_parts.into_iter().map(|(_, text)| text))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
             tools: input.tools,
             additional_messages: vec![],
         })
@@ -210,12 +216,17 @@ fn agent(
     provider: Arc<dyn Provider>,
     model: ModelConfig,
     cancel: CancellationToken,
+    extensions: Arc<Extensions>,
 ) -> StateMachine<'static, Session, Effect> {
     StateMachine::new(
         vec![
             Step::Operation(Arc::new(
                 ToolOperation::<Session>::new().with_async_tool::<Shell>(),
             )),
+            Step::Operation(Arc::new(oi_kit_agent::mcp::ExtensionOperation::new(
+                extensions,
+            ))),
+            Step::Operation(Arc::new(UnhandledToolCallsOperation::new())),
             Step::Inference(Arc::new(
                 InferenceRunner::<Session, Effect>::new(provider, model)
                     .with_request_preparer(Arc::new(Prompt)),
@@ -267,9 +278,9 @@ async fn run_turn(
         println!();
         Ok::<_, io::Error>(())
     });
-    let machine = agent(provider, model, cancel);
-    // Await the run even on cancellation so the GDK can finalize tool responses.
-    let id = runtime.snapshot().id;
+    let machine = agent(provider, model, cancel, runtime.1.clone());
+    // Await the run even on cancellation so oi-kit can finalize tool responses.
+    let id = runtime.session_id();
     let result = machine.run(runtime, &id, &emitter).await;
     drop(emitter);
     display.await??;
@@ -323,20 +334,23 @@ async fn chat(
     Ok(())
 }
 
-const HELP: &str = "Usage: ngrc [--session-dir DIR | --resume FILE.jsonl] [--] [prompt]
+const HELP: &str =
+    "Usage: ngrc [--session-dir DIR | --resume FILE.jsonl] [--extensions FILE] [--] [prompt]
 
 Start a saved chat, optionally sending the first message from arguments.
   --session-dir DIR  Store new sessions here (default: NGRC_SESSION_DIR or ~/.ngrc/sessions)
   --resume FILE      Resume a JSONL session, keeping its saved working directory
+  --extensions FILE  Load MCP extensions from a JSON array (opt-in on every launch)
   -h, --help         Show this help
 Requires OPENAI_API_KEY and NGRC_MODEL (also used when resuming).
 EOF (Ctrl-D) or Ctrl-C exits. Messages, usage, and metadata are append-only.
-Runs Bash commands without approval or sandboxing.";
+Runs shell and MCP tools without approval or sandboxing.";
 
 #[derive(Default)]
 struct Options {
     directory: Option<PathBuf>,
     resume: Option<PathBuf>,
+    extensions: Option<PathBuf>,
     initial: Option<String>,
     help: bool,
 }
@@ -347,12 +361,14 @@ impl Options {
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--session-dir" | "--resume" => {
+                "--session-dir" | "--resume" | "--extensions" => {
                     let value = args
                         .next()
                         .filter(|value| !value.is_empty())
                         .with_context(|| format!("{arg} requires a path"))?;
-                    let slot = if arg == "--resume" {
+                    let slot = if arg == "--extensions" {
+                        &mut options.extensions
+                    } else if arg == "--resume" {
                         &mut options.resume
                     } else {
                         &mut options.directory
@@ -403,6 +419,7 @@ async fn main() -> Result<()> {
         println!("{HELP}");
         return Ok(());
     }
+    let extensions = Arc::new(Extensions::load(options.extensions.as_deref())?);
     let key = std::env::var("OPENAI_API_KEY").context("set OPENAI_API_KEY")?;
     let model =
         std::env::var("NGRC_MODEL").context("set NGRC_MODEL to a tool-capable OpenAI model")?;
@@ -440,8 +457,10 @@ async fn main() -> Result<()> {
         store.path.display(),
         store.session.created_at
     );
-    let runtime = Runtime(Mutex::new(store));
-    eprintln!("Warning: shell commands run without approval or sandboxing. EOF or Ctrl-C to exit.");
+    let runtime = Runtime(Mutex::new(store), extensions.clone());
+    eprintln!(
+        "Warning: shell and MCP tools run without approval or sandboxing. EOF or Ctrl-C to exit."
+    );
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let ctrl_c = tokio::spawn(async move {
@@ -449,15 +468,25 @@ async fn main() -> Result<()> {
             stop.cancel();
         }
     });
-    let result = chat(
-        &runtime,
-        Arc::new(OpenAiProvider::new(client)),
-        ModelConfig::new(model),
-        options.initial,
-        stdin_lines(),
-        cancel.clone(),
-    )
+    let result = async {
+        let session = runtime.snapshot();
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(()),
+            result = extensions.start(&session) => result?,
+        }
+        chat(
+            &runtime,
+            Arc::new(OpenAiProvider::new(client)),
+            ModelConfig::new(model),
+            options.initial,
+            stdin_lines(),
+            cancel.clone(),
+        )
+        .await
+    }
     .await;
+    extensions.release(&runtime.session_id()).await;
     ctrl_c.abort();
     result?;
     if cancel.is_cancelled() {

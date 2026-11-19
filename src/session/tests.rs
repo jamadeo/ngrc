@@ -1,5 +1,5 @@
 use super::*;
-use goose_provider_types::conversation::token_usage::Usage;
+use oi_kit_provider_types::conversation::token_usage::Usage;
 
 struct Directory(PathBuf);
 

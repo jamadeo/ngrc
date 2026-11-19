@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use goose_provider_types::conversation::{
+use oi_kit_provider_types::conversation::{
     message::Message, token_usage::ProviderUsage, Conversation,
 };
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,7 @@ impl Session {
     fn apply(&mut self, record: Record) {
         match record {
             Record::Metadata { metadata } => self.metadata = metadata,
-            // Preserve GDK delta merging, including metadata-only messages.
+            // Preserve oi-kit delta merging, including metadata-only messages.
             Record::Message { message } => self.conversation.push(message),
             Record::Usage { usage } => self.usage.push(usage),
             Record::Created { .. } => unreachable!("creation is only valid as the first record"),

@@ -1,6 +1,6 @@
 use super::*;
-use goose_agent::operation::Operation;
-use goose_provider_types::{
+use oi_kit_agent::operation::Operation;
+use oi_kit_provider_types::{
     base::{stream_from_single_message, MessageStream},
     errors::ProviderError,
 };
@@ -29,7 +29,7 @@ impl Provider for ScriptedProvider {
             0 => Message::assistant().with_tool_request(
                 "shell-1",
                 Ok(CallToolRequestParams::new("shell").with_arguments(
-                    [("command".into(), "printf gdk-shell-ok".into())]
+                    [("command".into(), "printf oi-kit-shell-ok".into())]
                         .into_iter()
                         .collect(),
                 )),
@@ -39,7 +39,7 @@ impl Provider for ScriptedProvider {
                     .iter()
                     .find(|message| message.get_tool_response_ids().contains(&"shell-1"))
                     .expect("shell response must be returned to the model");
-                assert!(format!("{response:?}").contains("gdk-shell-ok"));
+                assert!(format!("{response:?}").contains("oi-kit-shell-ok"));
                 Message::assistant().with_text("done")
             }
             2 => {
@@ -51,7 +51,7 @@ impl Provider for ScriptedProvider {
                     .iter()
                     .find(|message| message.get_tool_response_ids().contains(&"shell-1"))
                     .expect("previous shell result must remain in context");
-                assert!(format!("{response:?}").contains("gdk-shell-ok"));
+                assert!(format!("{response:?}").contains("oi-kit-shell-ok"));
                 Message::assistant().with_text("follow-up done")
             }
             n => panic!("unexpected provider call {n}"),
@@ -134,11 +134,16 @@ async fn model_shell_model_loop_completes() -> Result<()> {
     let cancel = CancellationToken::new();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
-    let machine = agent(provider.clone(), ModelConfig::new("test"), cancel);
+    let machine = agent(
+        provider.clone(),
+        ModelConfig::new("test"),
+        cancel,
+        Arc::new(Extensions::load(None)?),
+    );
     let runtime = runtime();
     let session = tokio::time::timeout(
         Duration::from_secs(5),
-        machine.run(&*runtime, &runtime.snapshot().id, &emitter),
+        machine.run(&*runtime, &runtime.session_id(), &emitter),
     )
     .await??;
     assert_eq!(
@@ -174,9 +179,14 @@ async fn provider_errors_are_detectable_in_the_final_session() -> Result<()> {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let emitter = Emitter::new(tx, cancel.clone());
     let runtime = runtime();
-    let session = agent(Arc::new(FailingProvider), ModelConfig::new("test"), cancel)
-        .run(&*runtime, &runtime.snapshot().id, &emitter)
-        .await?;
+    let session = agent(
+        Arc::new(FailingProvider),
+        ModelConfig::new("test"),
+        cancel,
+        Arc::new(Extensions::load(None)?),
+    )
+    .run(&*runtime, &runtime.session_id(), &emitter)
+    .await?;
     assert!(session.conversation.last().unwrap().error_kind().is_some());
     Ok(())
 }
@@ -209,7 +219,10 @@ fn empty_runtime() -> TestRuntime {
     )
     .unwrap();
     TestRuntime {
-        runtime: Some(Runtime(Mutex::new(store))),
+        runtime: Some(Runtime(
+            Mutex::new(store),
+            Arc::new(Extensions::load(None).unwrap()),
+        )),
         directory,
     }
 }
@@ -361,7 +374,10 @@ async fn resumed_chat_restores_shell_results_and_appends_follow_up() -> Result<(
     let store = SessionStore::open(&path)?;
     assert_eq!(store.session.conversation, expected.conversation);
     assert_eq!(store.session.usage.len(), 2);
-    runtime.runtime = Some(Runtime(Mutex::new(store)));
+    runtime.runtime = Some(Runtime(
+        Mutex::new(store),
+        Arc::new(Extensions::load(None).unwrap()),
+    ));
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     drop(tx);
     chat(
@@ -423,7 +439,11 @@ fn parses_session_options_without_changing_prompt_arguments() -> Result<()> {
         parse(&["hello", "--resume"])?.initial.as_deref(),
         Some("hello --resume")
     );
+    let options = parse(&["--extensions", "mcp.json", "--resume", "saved.jsonl"])?;
+    assert_eq!(options.extensions, Some(PathBuf::from("mcp.json")));
     for args in [
+        vec!["--extensions"],
+        vec!["--extensions", "a", "--extensions", "b"],
         vec!["--resume"],
         vec!["--session-dir"],
         vec!["--resume", ""],
@@ -434,5 +454,124 @@ fn parses_session_options_without_changing_prompt_arguments() -> Result<()> {
     ] {
         assert!(parse(&args).is_err(), "should reject {args:?}");
     }
+    Ok(())
+}
+
+struct McpProvider(AtomicUsize);
+
+#[async_trait]
+impl Provider for McpProvider {
+    fn get_name(&self) -> &str {
+        "mcp-test"
+    }
+
+    async fn stream(
+        &self,
+        _: &ModelConfig,
+        system: &str,
+        messages: &[Message],
+        tools: &[Tool],
+    ) -> Result<MessageStream, ProviderError> {
+        assert!(system.contains("Fixture extension instructions"));
+        assert!(tools.iter().any(|tool| tool.name == "shell"));
+        assert!(tools.iter().any(|tool| tool.name == "fixture__probe"));
+        let n = self.0.fetch_add(1, Ordering::SeqCst);
+        let reply = if n.is_multiple_of(2) {
+            Message::assistant().with_tool_request(
+                format!("probe-{n}"),
+                Ok(CallToolRequestParams::new("fixture__probe")),
+            )
+        } else {
+            let response = messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .rev()
+                .find_map(MessageContent::as_tool_response)
+                .unwrap();
+            let result = response.tool_result.as_ref().unwrap();
+            assert_eq!(result.is_error, Some(false));
+            let value: serde_json::Value =
+                serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+            assert_eq!(value["calls"], n / 2 + 1); // Same server survives the next turn.
+            assert_eq!(value["env"], "fixture-value");
+            assert_eq!(
+                PathBuf::from(value["cwd"].as_str().unwrap()),
+                std::env::temp_dir().canonicalize().unwrap()
+            );
+            Message::assistant().with_text("mcp done")
+        };
+        Ok(stream_from_single_message(
+            reply,
+            ProviderUsage::new("test".into(), Default::default()),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn mcp_tools_run_across_turns_and_results_replay() -> Result<()> {
+    let mut runtime = empty_runtime();
+    let config = runtime.directory.join("extensions.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!([{
+            "type": "stdio", "name": "fixture", "cmd": "python3",
+            "args": [format!("{}/tests/fixtures/mcp_server.py", env!("CARGO_MANIFEST_DIR"))],
+            "envs": {"NGRC_FIXTURE": "fixture-value"}, "timeout": 5
+        }]))?,
+    )?;
+    runtime.runtime.as_mut().unwrap().1 = Arc::new(Extensions::load(Some(&config))?);
+    runtime.1.start(&runtime.snapshot()).await?;
+    let provider = Arc::new(McpProvider(AtomicUsize::new(0)));
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(Ok("again".into())).await?;
+    drop(tx);
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        chat(
+            &runtime,
+            provider.clone(),
+            ModelConfig::new("test"),
+            Some("probe".into()),
+            rx,
+            CancellationToken::new(),
+        ),
+    )
+    .await?;
+    runtime.1.release(&runtime.session_id()).await;
+    result?;
+    assert_eq!(provider.0.load(Ordering::SeqCst), 4);
+    let expected = runtime.snapshot();
+    let path = runtime.0.lock().unwrap().path.clone();
+    drop(runtime.runtime.take());
+    let reopened = SessionStore::open(&path)?;
+    assert_eq!(reopened.session.conversation, expected.conversation);
+    Ok(())
+}
+
+#[tokio::test]
+async fn extension_config_and_startup_errors_are_actionable() -> Result<()> {
+    let runtime = empty_runtime();
+    let path = runtime.directory.join("extensions.json");
+    for config in [
+        "not json",
+        r#"{}"#,
+        r#"[{"type":"unknown"}]"#,
+        r#"[{"type":"stdio","name":" ","cmd":"x","args":[]}]"#,
+        r#"[{"type":"stdio","name":"x","cmd":"","args":[]}]"#,
+        r#"[{"type":"stdio","name":"x","cmd":"x","args":[],"cwd":"relative"}]"#,
+        r#"[{"type":"stdio","name":"A B","cmd":"x","args":[]},{"type":"stdio","name":"ab","cmd":"x","args":[]}]"#,
+    ] {
+        std::fs::write(&path, config)?;
+        assert!(Extensions::load(Some(&path)).is_err(), "accepted {config}");
+    }
+    assert!(Extensions::load(Some(&path.with_extension("missing"))).is_err());
+    std::fs::write(
+        &path,
+        r#"[{"type":"stdio","name":"broken","cmd":"/nonexistent/ngrc-mcp-test","args":[],"timeout":1}]"#,
+    )?;
+    let extensions = Extensions::load(Some(&path))?;
+    let error = extensions.start(&runtime.snapshot()).await.unwrap_err();
+    extensions.release(&runtime.session_id()).await;
+    assert!(error.to_string().contains("start extension 'broken'"));
     Ok(())
 }
